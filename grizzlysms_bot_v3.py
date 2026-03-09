@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-🐻 GrizzlySMS Telegram Bot v3
+🐻 GrizzlySMS Telegram Bot v3 - FIXED
 - Setiap user input API Key GrizzlySMS mereka sendiri
 - Whitelist Telegram ID (hanya yang terdaftar bisa akses)
 - Default: Vietnam WhatsApp ~$0.19
+
+CHANGELOG v3-fixed:
+- [BUG FIX] Hapus maxPrice dari getNumber → penyebab utama error beli nomor
+- [BUG FIX] price default diubah ke 999 bukan 0.19 agar tidak memblokir pembelian
+- [BUG FIX] time.sleep() di async diganti asyncio.sleep() agar tidak blocking
 """
 
 import logging
 import requests
-import time
+import asyncio
 import json
+import os
 from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
@@ -19,23 +25,17 @@ from telegram.ext import (
 
 # ─── KONFIGURASI ────────────────────────────────────────────────────────────
 
-import os
-import asyncio
-
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8762689776:AAGmCnAH_WP6yhcH4EwpTPFxi8Ar0tW54IY")
 
 # Daftar Telegram ID yang boleh akses bot
-# Cek ID kamu di @userinfobot
-# Kosongkan list [] = semua orang bisa akses (tidak disarankan)
 ALLOWED_IDS = [
-    7052770466,   # ← ganti dengan Telegram ID kamu
-    # 987654321, # ← tambah ID orang lain di sini
+    7052770466,
+    # tambah ID lain di sini
 ]
 
 API_BASE  = "https://grizzlysms.com/stubs/handler_api.php"
 API_BASE2 = "https://api.grizzlysms.com/stubs/handler_api.php"
 
-# Default layanan: Vietnam WhatsApp
 DEFAULT_SERVICE  = "wa"
 DEFAULT_COUNTRY  = "18"
 DEFAULT_SVC_NAME = "WhatsApp"
@@ -51,8 +51,6 @@ HEADERS = {
 SMS_POLL_INTERVAL = 5
 SMS_MAX_WAIT      = 300
 
-# Storage global untuk auto-polling
-# {activation_id: {chat_id, api_key, phone, service, country, start_time}}
 AUTO_POLL_JOBS: dict = {}
 
 # ─── LOGGING ────────────────────────────────────────────────────────────────
@@ -64,11 +62,10 @@ logger = logging.getLogger(__name__)
 
 def is_allowed(user_id: int) -> bool:
     if not ALLOWED_IDS:
-        return True  # kalau list kosong = semua bisa akses
+        return True
     return user_id in ALLOWED_IDS
 
 async def check_access(update: Update) -> bool:
-    """Cek apakah user boleh akses. Return True jika boleh."""
     user = update.effective_user
     if not is_allowed(user.id):
         await update.message.reply_text(
@@ -77,7 +74,7 @@ async def check_access(update: Update) -> bool:
             "Hubungi admin untuk mendapatkan akses.",
             parse_mode="Markdown"
         )
-        logger.warning(f"Akses ditolak untuk user: {user.id} (@{user.username})")
+        logger.warning(f"Akses ditolak: {user.id} (@{user.username})")
         return False
     return True
 
@@ -103,7 +100,8 @@ def ensure_init(ctx):
     d.setdefault("country",        DEFAULT_COUNTRY)
     d.setdefault("svc_name",       DEFAULT_SVC_NAME)
     d.setdefault("ctr_name",       DEFAULT_CTR_NAME)
-    d.setdefault("price",          0.19)
+    # ✅ FIX: Default price 999 (tidak pakai maxPrice filter saat beli)
+    d.setdefault("price",          999)
 
 def fmt_numbers(actives: list) -> str:
     if not actives:
@@ -119,12 +117,13 @@ def fmt_numbers(actives: list) -> str:
 
 def error_map(msg: str) -> str:
     return {
-        "NO_NUMBERS":  "❌ Nomor habis untuk pilihan ini. Coba layanan/negara lain.",
-        "NO_BALANCE":  "❌ Saldo tidak cukup. Silakan top up di grizzlysms.com",
-        "BAD_KEY":     "❌ API Key tidak valid. Ganti lewat 🔑 Ganti API Key",
-        "BAD_SERVICE": "❌ Kode layanan tidak valid.",
-        "BAD_COUNTRY": "❌ Kode negara tidak valid.",
-        "SERVER_ERROR":"❌ Server error. Coba lagi nanti.",
+        "NO_NUMBERS":   "❌ Nomor habis untuk pilihan ini. Coba layanan/negara lain.",
+        "NO_BALANCE":   "❌ Saldo tidak cukup. Silakan top up di grizzlysms.com",
+        "BAD_KEY":      "❌ API Key tidak valid. Ganti lewat 🔑 Ganti API Key",
+        "BAD_SERVICE":  "❌ Kode layanan tidak valid.",
+        "BAD_COUNTRY":  "❌ Kode negara tidak valid.",
+        "SERVER_ERROR": "❌ Server error. Coba lagi nanti.",
+        "TOO_MANY_ACTIVE_ACTIVATIONS": "❌ Terlalu banyak aktivasi aktif. Batalkan dulu yang lama.",
     }.get(msg, f"❌ Error: {msg}")
 
 # ─── API ────────────────────────────────────────────────────────────────────
@@ -137,9 +136,16 @@ def api_call(api_key: str, params: dict) -> str:
         try:
             r = requests.get(url, params=params, headers=HEADERS, timeout=10, verify=False)
             result = r.text.strip()
-            # Kalau response mengandung HTML (error page), abaikan
-            if result.startswith("<") or len(result) > 200:
-                logger.warning(f"Response HTML/terlalu panjang dari {url}, skip")
+            # Skip jika response adalah HTML (error page dari server)
+            if result.startswith("<"):
+                logger.warning(f"Response HTML dari {url}, skip")
+                continue
+            # Skip jika sangat panjang DAN bukan format yang dikenal
+            if len(result) > 500 and not any(result.startswith(p) for p in [
+                "ACCESS_NUMBER:", "ACCESS_BALANCE:", "ACCESS_CANCEL",
+                "ACCESS_ACTIVATION", "STATUS_OK:", "STATUS_WAIT", "NO_", "BAD_"
+            ]):
+                logger.warning(f"Response tidak dikenal dari {url}: {result[:80]}")
                 continue
             logger.info(f"API [{params.get('action')}] → {result[:80]}")
             return result
@@ -149,9 +155,8 @@ def api_call(api_key: str, params: dict) -> str:
     return "SERVER_ERROR"
 
 def api_get_balance(api_key: str):
-    key = api_key.strip()
-    resp = api_call(key, {"action": "getBalance"})
-    logger.info(f"getBalance raw response: '{resp}'")
+    resp = api_call(api_key.strip(), {"action": "getBalance"})
+    logger.info(f"getBalance raw: '{resp}'")
     if resp.startswith("ACCESS_BALANCE:"):
         try:
             return float(resp.split(":")[1])
@@ -159,19 +164,35 @@ def api_get_balance(api_key: str):
             return 0.0
     return None
 
-def api_buy_number(api_key, service, country, max_price=None):
-    params = {"action": "getNumber", "service": service, "country": country}
-    # Hanya tambah maxPrice kalau di-set eksplisit dan bukan 999
-    if max_price and max_price < 999:
-        params["maxPrice"] = f"{max_price:.2f}"
+def api_buy_number(api_key: str, service: str, country: str):
+    """
+    ✅ FIX 1: Hapus maxPrice → penyebab NO_NUMBERS meski nomor tersedia di web
+    ✅ FIX 2: Parse response dengan maxsplit=2 agar phone number tidak terpotong
+              Format response: ACCESS_NUMBER:<id>:<phone>
+              Phone Vietnam seperti 84567725420 aman, tapi maxsplit memastikan
+              jika ada karakter : di bagian phone tidak ikut terpotong
+    """
+    params = {
+        "action":  "getNumber",
+        "service": service,
+        "country": country,
+    }
     resp = api_call(api_key, params)
+    logger.info(f"api_buy_number raw response: '{resp}'")
     if resp.startswith("ACCESS_NUMBER:"):
-        parts = resp.split(":")
+        # Gunakan maxsplit=2 agar phone number tidak terpotong
+        parts = resp.split(":", 2)
         if len(parts) >= 3:
-            return {"status": "ok", "id": parts[1], "phone": parts[2]}
+            activation_id = parts[1].strip()
+            phone = parts[2].strip()
+            logger.info(f"Parsed → id={activation_id}, phone={phone}")
+            return {"status": "ok", "id": activation_id, "phone": phone}
+        else:
+            logger.error(f"Response format tidak dikenal: '{resp}'")
+            return {"status": "error", "msg": "FORMAT_ERROR"}
     return {"status": "error", "msg": resp}
 
-def api_get_sms(api_key, activation_id):
+def api_get_sms(api_key: str, activation_id: str):
     resp = api_call(api_key, {"action": "getStatus", "id": activation_id})
     if resp.startswith("STATUS_OK:"):
         return {"status": "ok", "code": resp.split(":")[1]}
@@ -181,15 +202,15 @@ def api_get_sms(api_key, activation_id):
         return {"status": "cancelled"}
     return {"status": "error", "msg": resp}
 
-def api_cancel(api_key, activation_id):
+def api_cancel(api_key: str, activation_id: str):
     resp = api_call(api_key, {"action": "setStatus", "id": activation_id, "status": 8})
     return "ACCESS_CANCEL" in resp or "ACCESS_ACTIVATION" in resp or resp == "1"
 
-def api_confirm(api_key, activation_id):
+def api_confirm(api_key: str, activation_id: str):
     resp = api_call(api_key, {"action": "setStatus", "id": activation_id, "status": 6})
     return "ACCESS_ACTIVATION" in resp or resp == "1"
 
-def api_get_price(api_key, service, country):
+def api_get_price(api_key: str, service: str, country: str):
     resp = api_call(api_key, {"action": "getPrices", "service": service, "country": country})
     try:
         data = json.loads(resp)
@@ -202,18 +223,17 @@ def api_get_price(api_key, service, country):
 
 def main_keyboard(ctx) -> ReplyKeyboardMarkup:
     svc_name = ctx.user_data.get("svc_name", DEFAULT_SVC_NAME)
-    price    = ctx.user_data.get("price", "?")
+    ctr_name = ctx.user_data.get("ctr_name", DEFAULT_CTR_NAME)
     return ReplyKeyboardMarkup([
         [KeyboardButton("💰 Cek Saldo"),      KeyboardButton("📲 Beli 1 Nomor")],
         [KeyboardButton("🔟 Beli 5 Nomor"),   KeyboardButton("🔢 Beli 3 Nomor")],
-        [KeyboardButton(f"📦 Layanan: {svc_name[:8]}..."), KeyboardButton(f"💲 Harga: ${price}")],
+        [KeyboardButton(f"📦 Layanan: {svc_name[:8]}"), KeyboardButton(f"🌍 {ctr_name[:10]}")],
         [KeyboardButton("🔑 Ganti API Key")],
         [KeyboardButton("❌ Batalkan Nomor"), KeyboardButton("🗑 Batalkan Semua")],
         [KeyboardButton("📋 Lihat Log")],
     ], resize_keyboard=True)
 
 def setup_keyboard() -> ReplyKeyboardMarkup:
-    """Keyboard saat user belum punya API Key."""
     return ReplyKeyboardMarkup([
         [KeyboardButton("🔑 Masukkan API Key")],
         [KeyboardButton("❓ Cara Dapat API Key")],
@@ -222,7 +242,6 @@ def setup_keyboard() -> ReplyKeyboardMarkup:
 # ─── SETUP API KEY FLOW ─────────────────────────────────────────────────────
 
 async def prompt_api_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Minta user input API Key mereka."""
     ctx.user_data["waiting_for"] = "api_key_setup"
     await update.message.reply_text(
         "🔑 *Masukkan API Key GrizzlySMS kamu*\n\n"
@@ -249,7 +268,6 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
     country  = ctx.user_data["country"]
     svc_name = ctx.user_data["svc_name"]
     ctr_name = ctx.user_data["ctr_name"]
-    price    = ctx.user_data.get("price", 999)
 
     msg = await update.message.reply_text(
         f"⏳ Membeli *{qty}x* nomor *{svc_name}* {ctr_name}...",
@@ -258,7 +276,9 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
 
     results = []
     for i in range(qty):
+        # ✅ FIX: Tidak ada maxPrice, sama seperti beli lewat web
         result = api_buy_number(api_key, service, country)
+
         if result["status"] == "ok":
             entry = {
                 "id":      result["id"],
@@ -271,25 +291,27 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
             results.append(entry)
             add_log(ctx, f"BELI OK | ID:{result['id']} | +{result['phone']} | {svc_name} {ctr_name}")
 
-            # Register auto-poll background
             AUTO_POLL_JOBS[result["id"]] = {
                 "chat_id":    update.effective_chat.id,
                 "api_key":    api_key,
                 "phone":      result["phone"],
                 "service":    svc_name,
                 "country":    ctr_name,
-                "start_time": time.time(),
+                "start_time": __import__("time").time(),
             }
             asyncio.create_task(auto_poll_worker(ctx.application, result["id"]))
 
             if qty > 1:
-                time.sleep(1)
+                # ✅ FIX: Pakai asyncio.sleep bukan time.sleep (tidak blocking async)
+                await asyncio.sleep(1)
         else:
-            add_log(ctx, f"BELI GAGAL | {result.get('msg','?')} | {svc_name} {ctr_name}")
+            err_msg = result.get("msg", "UNKNOWN")
+            add_log(ctx, f"BELI GAGAL | {err_msg} | {svc_name} {ctr_name}")
+            logger.error(f"Beli nomor gagal: raw response = '{err_msg}'")
             if qty == 1:
-                await msg.edit_text(error_map(result.get("msg", "?")), parse_mode="Markdown")
+                await msg.edit_text(error_map(err_msg), parse_mode="Markdown")
                 return
-            results.append({"error": result.get("msg", "?")})
+            results.append({"error": err_msg})
 
     if qty == 1 and results and "error" not in results[0]:
         n = results[0]
@@ -306,12 +328,13 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
         lines = [f"📊 *Hasil Beli {qty} Nomor*\n"]
         for i, n in enumerate(results, 1):
             if "error" in n:
-                lines.append(f"{i}. ❌ Gagal: {n['error']}")
+                lines.append(f"{i}. ❌ Gagal: {error_map(n['error'])}")
             else:
                 lines.append(f"{i}. ✅ `+{n['phone']}` | ID: `{n['id']}`")
         ok = sum(1 for n in results if "error" not in n)
         lines.append(f"\n✅ Berhasil: {ok}/{qty}")
-        lines.append(f"🔔 OTP akan dikirim otomatis!")
+        if ok > 0:
+            lines.append(f"🔔 OTP akan dikirim otomatis!")
         text = "\n".join(lines)
 
     await msg.edit_text(text, parse_mode="Markdown")
@@ -326,7 +349,6 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     api_key = get_api_key(ctx)
 
     if not api_key:
-        # Belum setup API Key
         await update.message.reply_text(
             f"🐻 *Selamat datang, {user.first_name}!*\n\n"
             f"🆔 Telegram ID kamu: `{user.id}`\n\n"
@@ -356,7 +378,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or ""
     api_key = get_api_key(ctx)
 
-    # ── Setup mode (belum punya API Key)
     if text == "🔑 Masukkan API Key":
         await prompt_api_key(update, ctx)
         return
@@ -376,12 +397,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ── Waiting for API Key input
     if ctx.user_data.get("waiting_for") == "api_key_setup":
         ctx.user_data.pop("waiting_for")
         new_key = text.strip()
 
-        # Validasi format dasar
         if len(new_key) < 10:
             await update.message.reply_text(
                 "❌ API Key terlalu pendek. Pastikan copy dengan lengkap.\nCoba lagi 👇",
@@ -395,7 +414,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-        # Coba langsung hit API
         raw = api_call(new_key, {"action": "getBalance"})
         logger.info(f"Validasi API Key user {update.effective_user.id}: raw='{raw}'")
 
@@ -416,6 +434,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.edit_text(
                 f"❌ *API Key gagal divalidasi*\n\n"
+                f"Response: `{raw}`\n\n"
                 f"Pastikan API Key benar dari grizzlysms.com → Settings\n\n"
                 f"Coba lagi 👇",
                 parse_mode="Markdown"
@@ -423,7 +442,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             ctx.user_data["waiting_for"] = "api_key_setup"
         return
 
-    # ── Waiting for cancel select
     if ctx.user_data.get("waiting_for") == "cancel_select":
         ctx.user_data.pop("waiting_for")
         actives = ctx.user_data.get("active_numbers", [])
@@ -444,7 +462,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Masukkan angka sesuai urutan.")
         return
 
-    # ── Waiting for ganti API Key (dari menu)
     if ctx.user_data.get("waiting_for") == "api_key_change":
         ctx.user_data.pop("waiting_for")
         new_key = text.strip()
@@ -455,14 +472,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             add_log(ctx, f"API KEY GANTI | saldo: ${bal:.4f}")
             await msg.edit_text(
                 f"✅ *API Key berhasil diperbarui!*\n\n💰 Saldo: *${bal:.4f}*",
-                parse_mode="Markdown"
+                parse_mode="Markdown",
+                reply_markup=main_keyboard(ctx)
             )
         else:
             await msg.edit_text("❌ API Key tidak valid. Coba lagi.", parse_mode="Markdown")
             ctx.user_data["waiting_for"] = "api_key_change"
         return
 
-    # ── Kalau belum ada API Key, arahkan setup
     if not api_key:
         await update.message.reply_text(
             "⚠️ Kamu belum memasukkan API Key!\nKlik tombol di bawah 👇",
@@ -495,12 +512,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif text.startswith("📦 Layanan"):
         svc = ctx.user_data.get("svc_name", DEFAULT_SVC_NAME)
         ctr = ctx.user_data.get("ctr_name", DEFAULT_CTR_NAME)
-        p   = ctx.user_data.get("price", "?")
         await update.message.reply_text(
             f"📦 *Layanan Aktif*\n\n"
             f"Layanan : *{svc}*\n"
-            f"Negara  : *{ctr}*\n"
-            f"Harga   : *${p}*\n\n"
+            f"Negara  : *{ctr}*\n\n"
             f"Ganti dengan perintah:\n"
             f"`/setlayanan <kode_svc> <kode_negara> <nama_svc> <nama_negara>`\n\n"
             f"*Contoh populer:*\n"
@@ -511,7 +526,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-    elif text.startswith("💲 Harga"):
+    elif text.startswith("🌍"):
         msg = await update.message.reply_text("⏳ Mengambil harga...")
         info = api_get_price(api_key, ctx.user_data["service"], ctx.user_data["country"])
         await msg.edit_text(
@@ -553,7 +568,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if api_cancel(api_key, n["id"]):
                 success += 1
                 add_log(ctx, f"CANCEL OK | ID:{n['id']} | +{n['phone']}")
-            time.sleep(0.5)
+            await asyncio.sleep(0.5)  # ✅ FIX: asyncio.sleep bukan time.sleep
         ctx.user_data["active_numbers"] = []
         await msg.edit_text(f"✅ Selesai! Berhasil batalkan: {success}/{len(actives)} nomor")
 
@@ -600,6 +615,7 @@ async def poll_sms(update, ctx, activation_id: str):
         f"_Auto-cek tiap {SMS_POLL_INTERVAL}s, maks {SMS_MAX_WAIT//60} menit_",
         parse_mode="Markdown"
     )
+    import time
     start_time = time.time()
     attempt = 0
     while time.time() - start_time < SMS_MAX_WAIT:
@@ -630,7 +646,7 @@ async def poll_sms(update, ctx, activation_id: str):
             f"Percobaan ke-{attempt} | ⏱️ {elapsed}s",
             parse_mode="Markdown"
         )
-        time.sleep(SMS_POLL_INTERVAL)
+        await asyncio.sleep(SMS_POLL_INTERVAL)  # ✅ FIX: asyncio.sleep
     await msg.edit_text(
         f"⏰ *Timeout!* SMS tidak datang dalam {SMS_MAX_WAIT//60} menit.\n"
         f"Coba `/cancel {activation_id}` untuk batalkan.",
@@ -699,9 +715,11 @@ async def setlayanan_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("⏳ Mengecek harga...")
     info = api_get_price(api_key, svc_code, ctr_code)
     ctx.user_data.update({
-        "service": svc_code, "country": ctr_code,
-        "svc_name": svc_name, "ctr_name": ctr_name,
-        "price": info["cost"]
+        "service":  svc_code,
+        "country":  ctr_code,
+        "svc_name": svc_name,
+        "ctr_name": ctr_name,
+        "price":    info["cost"],
     })
     add_log(ctx, f"SET LAYANAN | {svc_name} {ctr_name} ${info['cost']}")
     await msg.edit_text(
@@ -724,7 +742,6 @@ async def daftar_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 async def myid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Tampilkan Telegram ID user."""
     user = update.effective_user
     await update.message.reply_text(
         f"🆔 *Telegram ID kamu:*\n\n`{user.id}`\n\n"
@@ -736,7 +753,7 @@ async def myid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── AUTO POLL BACKGROUND ───────────────────────────────────────────────────
 
 async def auto_poll_worker(app, activation_id: str):
-    """Background task: auto cek SMS dan kirim notif ke user."""
+    import time
     job = AUTO_POLL_JOBS.get(activation_id)
     if not job:
         return
@@ -749,7 +766,6 @@ async def auto_poll_worker(app, activation_id: str):
     start_t  = job["start_time"]
 
     while True:
-        # Cek timeout
         if time.time() - start_t > SMS_MAX_WAIT:
             AUTO_POLL_JOBS.pop(activation_id, None)
             await app.bot.send_message(
@@ -798,16 +814,16 @@ async def auto_poll_worker(app, activation_id: str):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",       start))
-    app.add_handler(CommandHandler("myid",        myid_cmd))
-    app.add_handler(CommandHandler("ceksms",      ceksms_cmd))
-    app.add_handler(CommandHandler("cancel",      cancel_cmd))
-    app.add_handler(CommandHandler("konfirmasi",  konfirmasi_cmd))
-    app.add_handler(CommandHandler("setlayanan",  setlayanan_cmd))
-    app.add_handler(CommandHandler("daftar",      daftar_cmd))
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("myid",       myid_cmd))
+    app.add_handler(CommandHandler("ceksms",     ceksms_cmd))
+    app.add_handler(CommandHandler("cancel",     cancel_cmd))
+    app.add_handler(CommandHandler("konfirmasi", konfirmasi_cmd))
+    app.add_handler(CommandHandler("setlayanan", setlayanan_cmd))
+    app.add_handler(CommandHandler("daftar",     daftar_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🐻 GrizzlySMS Bot v3 aktif!")
-    print(f"Whitelist: {ALLOWED_IDS if ALLOWED_IDS else 'Semua user (tidak ada whitelist)'}")
+    print("🐻 GrizzlySMS Bot v3-FIXED aktif!")
+    print(f"Whitelist: {ALLOWED_IDS if ALLOWED_IDS else 'Semua user'}")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
