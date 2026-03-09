@@ -235,15 +235,15 @@ def api_get_price(api_key: str, service: str, country: str) -> dict:
 # ─── KEYBOARD ─────────────────────────────────────────────────────────────────
 
 def main_keyboard(ctx) -> ReplyKeyboardMarkup:
-    svc  = ctx.user_data.get("svc_name", DEFAULT_SVC_NAME)
-    ctr  = ctx.user_data.get("ctr_name", DEFAULT_CTR_NAME)
+    svc   = ctx.user_data.get("svc_name", DEFAULT_SVC_NAME)
+    price = ctx.user_data.get("price", "?")
     return ReplyKeyboardMarkup([
-        [KeyboardButton("💰 Cek Saldo"),     KeyboardButton("📲 Beli 1 Nomor")],
-        [KeyboardButton("🔢 Beli 3 Nomor"),  KeyboardButton("🔟 Beli 5 Nomor")],
-        [KeyboardButton(f"📦 {svc[:12]}"),   KeyboardButton(f"🌍 {ctr[:12]}")],
-        [KeyboardButton("💲 Cek Harga"),     KeyboardButton("🔑 Ganti API Key")],
-        [KeyboardButton("❌ Batalkan Nomor"),KeyboardButton("🗑 Batalkan Semua")],
-        [KeyboardButton("📋 Nomor Aktif"),   KeyboardButton("📜 Lihat Log")],
+        [KeyboardButton("💰 Cek Saldo"),        KeyboardButton("📲 Beli 1 Nomor")],
+        [KeyboardButton("🔟 Beli 5 Nomor"),     KeyboardButton("🔢 Beli 3 Nomor")],
+        [KeyboardButton(f"📦 Layanan: {svc[:8]}..."), KeyboardButton(f"💲 Harga: ${price}")],
+        [KeyboardButton("🔑 Ganti API Key")],
+        [KeyboardButton("❌ Batalkan Nomor..."), KeyboardButton("🗑 Batalkan Semua")],
+        [KeyboardButton("📋 Lihat Log")],
     ], resize_keyboard=True)
 
 def setup_keyboard() -> ReplyKeyboardMarkup:
@@ -660,19 +660,14 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["active_numbers"] = []
         await msg.edit_text(f"✅ Dibatalkan: {success}/{len(actives)} nomor")
 
-    elif "Nomor Aktif" in text:
-        actives = ctx.user_data.get("active_numbers", [])
-        await update.message.reply_text(
-            f"📋 *Nomor Aktif ({len(actives)})*\n\n{fmt_numbers(actives)}",
-            parse_mode="Markdown"
-        )
-
     elif "Lihat Log" in text:
         logs = ctx.user_data.get("log", [])
         if not logs:
-            await update.message.reply_text("📋 Log kosong."); return
+            await update.message.reply_text("📋 Log kosong.")
+            return
+        log_text = "\n".join(logs[-20:])
         await update.message.reply_text(
-            f"📜 *Log (20 terbaru)*\n\n`{''.join(chr(10)+l for l in logs[-20:])}`",
+            f"📋 *Log Aktivitas (20 terbaru)*\n\n`{log_text}`",
             parse_mode="Markdown"
         )
 
