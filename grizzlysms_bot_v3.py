@@ -159,8 +159,12 @@ def api_get_balance(api_key: str):
             return 0.0
     return None
 
-def api_buy_number(api_key, service, country, max_price=999):
-    resp = api_call(api_key, {"action": "getNumber", "service": service, "country": country, "maxPrice": max_price})
+def api_buy_number(api_key, service, country, max_price=None):
+    params = {"action": "getNumber", "service": service, "country": country}
+    # Hanya tambah maxPrice kalau di-set eksplisit dan bukan 999
+    if max_price and max_price < 999:
+        params["maxPrice"] = f"{max_price:.2f}"
+    resp = api_call(api_key, params)
     if resp.startswith("ACCESS_NUMBER:"):
         parts = resp.split(":")
         if len(parts) >= 3:
@@ -254,7 +258,7 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
 
     results = []
     for i in range(qty):
-        result = api_buy_number(api_key, service, country, max_price=0.22)
+        result = api_buy_number(api_key, service, country)
         if result["status"] == "ok":
             entry = {
                 "id":      result["id"],
