@@ -27,7 +27,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_BOT_TOKEN_DISINI")
 # Cek ID kamu di @userinfobot
 # Kosongkan list [] = semua orang bisa akses (tidak disarankan)
 ALLOWED_IDS = [
-    123456789,   # ← ganti dengan Telegram ID kamu
+    7052770466,   # ← ganti dengan Telegram ID kamu
     # 987654321, # ← tambah ID orang lain di sini
 ]
 
