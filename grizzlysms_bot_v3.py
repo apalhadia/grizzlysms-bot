@@ -799,7 +799,7 @@ async def ceksms_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
+https://github.com/apalhadia/grizzlysms-bot/blob/main/grizzlysms_bot_v3.py
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("myid",       myid_cmd))
     app.add_handler(CommandHandler("ceksms",     ceksms_cmd))
