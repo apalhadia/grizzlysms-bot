@@ -19,7 +19,9 @@ from telegram.ext import (
 
 # ─── KONFIGURASI ────────────────────────────────────────────────────────────
 
-BOT_TOKEN = "ISI_BOT_TOKEN_DARI_BOTFATHER"
+import os
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_BOT_TOKEN_DISINI")
 
 # Daftar Telegram ID yang boleh akses bot
 # Cek ID kamu di @userinfobot
