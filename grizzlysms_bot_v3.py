@@ -254,7 +254,7 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
 
     results = []
     for i in range(qty):
-        result = api_buy_number(api_key, service, country, max_price=0.20)
+        result = api_buy_number(api_key, service, country, max_price=0.22)
         if result["status"] == "ok":
             entry = {
                 "id":      result["id"],
