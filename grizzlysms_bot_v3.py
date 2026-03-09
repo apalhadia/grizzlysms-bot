@@ -20,8 +20,9 @@ from telegram.ext import (
 # ─── KONFIGURASI ────────────────────────────────────────────────────────────
 
 import os
+import asyncio
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_BOT_TOKEN_DISINI")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8762689776:AAGmCnAH_WP6yhcH4EwpTPFxi8Ar0tW54IY")
 
 # Daftar Telegram ID yang boleh akses bot
 # Cek ID kamu di @userinfobot
@@ -46,6 +47,13 @@ HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
     "Connection": "keep-alive",
 }
+
+SMS_POLL_INTERVAL = 5
+SMS_MAX_WAIT      = 300
+
+# Storage global untuk auto-polling
+# {activation_id: {chat_id, api_key, phone, service, country, start_time}}
+AUTO_POLL_JOBS: dict = {}
 
 # ─── LOGGING ────────────────────────────────────────────────────────────────
 
@@ -259,6 +267,18 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
             ctx.user_data["active_numbers"].append(entry)
             results.append(entry)
             add_log(ctx, f"BELI OK | ID:{result['id']} | +{result['phone']} | {svc_name} {ctr_name}")
+
+            # Register auto-poll background
+            AUTO_POLL_JOBS[result["id"]] = {
+                "chat_id":    update.effective_chat.id,
+                "api_key":    api_key,
+                "phone":      result["phone"],
+                "service":    svc_name,
+                "country":    ctr_name,
+                "start_time": time.time(),
+            }
+            asyncio.create_task(auto_poll_worker(ctx.application, result["id"]))
+
             if qty > 1:
                 time.sleep(1)
         else:
@@ -276,8 +296,8 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
             f"🆔 *ID Aktivasi:* `{n['id']}`\n"
             f"📦 {n['service']} | {n['country']}\n"
             f"🕐 {n['time']}\n\n"
-            f"Masukkan nomor ke layanan tujuan, lalu:\n"
-            f"`/ceksms {n['id']}` untuk terima OTP"
+            f"🔔 *OTP akan dikirim otomatis saat masuk!*\n"
+            f"Masukkan nomor ke layanan tujuan sekarang 👆"
         )
     else:
         lines = [f"📊 *Hasil Beli {qty} Nomor*\n"]
@@ -285,9 +305,10 @@ async def do_buy(update: Update, ctx: ContextTypes.DEFAULT_TYPE, qty: int):
             if "error" in n:
                 lines.append(f"{i}. ❌ Gagal: {n['error']}")
             else:
-                lines.append(f"{i}. ✅ `+{n['phone']}` | ID: `{n['id']}`\n   `/ceksms {n['id']}`")
+                lines.append(f"{i}. ✅ `+{n['phone']}` | ID: `{n['id']}`")
         ok = sum(1 for n in results if "error" not in n)
         lines.append(f"\n✅ Berhasil: {ok}/{qty}")
+        lines.append(f"🔔 OTP akan dikirim otomatis!")
         text = "\n".join(lines)
 
     await msg.edit_text(text, parse_mode="Markdown")
@@ -708,6 +729,67 @@ async def myid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"Username: @{user.username or '-'}",
         parse_mode="Markdown"
     )
+
+# ─── AUTO POLL BACKGROUND ───────────────────────────────────────────────────
+
+async def auto_poll_worker(app, activation_id: str):
+    """Background task: auto cek SMS dan kirim notif ke user."""
+    job = AUTO_POLL_JOBS.get(activation_id)
+    if not job:
+        return
+
+    chat_id  = job["chat_id"]
+    api_key  = job["api_key"]
+    phone    = job["phone"]
+    service  = job["service"]
+    country  = job["country"]
+    start_t  = job["start_time"]
+
+    while True:
+        # Cek timeout
+        if time.time() - start_t > SMS_MAX_WAIT:
+            AUTO_POLL_JOBS.pop(activation_id, None)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"⏰ *Timeout!*\n\n"
+                     f"SMS tidak masuk dalam {SMS_MAX_WAIT//60} menit\n"
+                     f"📞 `+{phone}` | ID: `{activation_id}`\n\n"
+                     f"Gunakan `/cancel {activation_id}` untuk batalkan.",
+                parse_mode="Markdown"
+            )
+            return
+
+        result = api_get_sms(api_key, activation_id)
+
+        if result["status"] == "ok":
+            code = result["code"]
+            AUTO_POLL_JOBS.pop(activation_id, None)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"🔔 *OTP MASUK!*\n\n"
+                     f"📞 Nomor: `+{phone}`\n"
+                     f"🔑 Kode OTP: `{code}`\n"
+                     f"📦 Layanan: {service}\n"
+                     f"🌍 {country}\n\n"
+                     f"✅ Setelah verifikasi: `/konfirmasi {activation_id}`",
+                parse_mode="Markdown"
+            )
+            return
+
+        elif result["status"] == "cancelled":
+            AUTO_POLL_JOBS.pop(activation_id, None)
+            await app.bot.send_message(
+                chat_id=chat_id,
+                text=f"❌ Aktivasi `{activation_id}` dibatalkan.",
+                parse_mode="Markdown"
+            )
+            return
+
+        elif result["status"] == "error":
+            AUTO_POLL_JOBS.pop(activation_id, None)
+            return
+
+        await asyncio.sleep(SMS_POLL_INTERVAL)
 
 # ─── MAIN ───────────────────────────────────────────────────────────────────
 
